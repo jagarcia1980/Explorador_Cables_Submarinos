@@ -1,0 +1,982 @@
+// ============================================================================
+// ZombIA - SIMULADOR GIS TÁCTICO & NARRATIVA INTERACTIVA ("ELIGE TU AVENTURA")
+// ============================================================================
+ini_set('display_errors', 0);
+require_once 'config.php';
+
+try {
+    $pdo = new PDO("mysql:host=$host;dbname=$db;charset=$charset", $user, $pass, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
+    ]);
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS zombie_pois (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        lat DOUBLE NOT NULL,
+        lng DOUBLE NOT NULL,
+        nombre VARCHAR(150) NOT NULL,
+        categoria VARCHAR(100) NOT NULL,
+        suministros TEXT NULL,
+        nivel_amenaza VARCHAR(50) DEFAULT 'Medio',
+        creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS zombie_huellas (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        session_id VARCHAR(64) NOT NULL,
+        lat DOUBLE NOT NULL,
+        lng DOUBLE NOT NULL,
+        accion TEXT NOT NULL,
+        creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+} catch (PDOException $e) {
+    die("Error crítico de base de datos: " . $e->getMessage());
+}
+
+function consultarGemini($prompt, $apiKey, $jsonMode = false) {
+    $payload = [
+        "contents" => [["parts" => [["text" => $prompt]]]],
+        "generationConfig" => [
+            "temperature" => 0.4
+        ]
+    ];
+    if ($jsonMode) {
+        $payload["generationConfig"]["responseMimeType"] = "application/json";
+    }
+
+    $ch = curl_init("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" . $apiKey);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS     => json_encode($payload),
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_TIMEOUT        => 12
+    ]);
+
+    $res = curl_exec($ch);
+    $output = '';
+    if (!curl_errno($ch)) {
+        $geminiRes = json_decode($res, true);
+        $output = $geminiRes['candidates'][0]['content']['parts'][0]['text'] ?? '';
+    }
+    curl_close($ch);
+    return $output;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion']) && $_POST['accion'] === 'escanear_radar') {
+    if (ob_get_length()) { ob_clean(); }
+    header('Content-Type: application/json; charset=utf-8');
+
+    $lat = (float)($_POST['lat'] ?? 36.7213);
+    $lng = (float)($_POST['lng'] ?? -4.4214);
+    $callesCercanas = trim($_POST['calles_entorno'] ?? '');
+
+    $prompt = "Actúa como radar cartográfico de Project Zomboid. El superviviente se encuentra exactamente en las coordenadas (latitud: $lat, longitud: $lng). ";
+    if (!empty($callesCercanas)) {
+        $prompt .= "Calles y vías adyacentes detectadas: [$callesCercanas]. ";
+    }
+    $prompt .= "Paso 1: Deduce de forma precisa el municipio, barrio y entorno urbano exacto correspondiente a estas coordenadas. "
+        . "Paso 2: Genera entre 6 y 8 puntos de interés REALES y auténticos que existan en esta ciudad/barrio o que sean característicos de esta zona urbana concreta: "
+        . "supermercados reales (Mercadona, Carrefour Market, Día, Aldi, etc.), farmacias reales de esa zona, centros de salud o ambulatorios reales del distrito, gasolineras (Repsol, Cepsa, etc.), comisarías o colegios/institutos públicos reales. "
+        . "Paso 3: Prohibido usar etiquetas genéricas como 'Supermercado de Barrio' o 'Zona Urbana'. Usa nombres propios específicos y verosímiles. "
+        . "Paso 4: Muy importante: para que aparezcan en el encuadre visual inmediato del usuario, sitúa sus coordenadas (lat, lng) muy cerca del punto base (a una distancia de entre 80 y 400 metros, es decir, variaciones de entre +/- 0.0008 y +/- 0.0035 respecto a $lat y $lng). "
+        . "Responde únicamente con un array JSON sin texto explicativo ni formato markdown: "
+        . "[{\"nombre\":\"Nombre Real Propio\",\"categoria\":\"Farmacia|Supermercado|Hospital|Refugio Amurallado|Combustible|Armería\",\"lat\":float,\"lng\":float,\"suministros\":\"víveres o medicinas concretas\",\"amenaza\":\"Bajo|Medio|Alto|Crítico\"}]";
+
+    $raw = consultarGemini($prompt, $GEMINI_API_KEY, true);
+    $items = json_decode($raw, true) ?: [];
+
+    if (empty($items)) {
+        $plantillas = [
+            ['Farmacia 24h Central', 'Farmacia', 'Antibióticos, vendas y alcohol', 'Bajo', 0.0012, 0.0009],
+            ['Supermercado de Abastos', 'Supermercado', 'Conservas, agua mineral y cerillas', 'Medio', -0.0014, 0.0011],
+            ['Instituto Público del Barrio', 'Refugio Amurallado', 'Vallas metálicas, mantas y herramientas', 'Medio', 0.0019, -0.0015],
+            ['Centro de Salud / Urgencias', 'Hospital', 'Sueros, gasas y material de cura', 'Alto', -0.0015, -0.0018],
+            ['Estación de Servicio Repsol/Cepsa', 'Combustible', 'Bidones de gasolina y baterías', 'Alto', 0.0022, 0.0014],
+            ['Comisaría de Policía del Distrito', 'Armería', 'Munición 9mm y equipo antidisturbios', 'Crítico', -0.0019, 0.0008]
+        ];
+        foreach ($plantillas as $p) {
+            $items[] = [
+                'nombre'      => $p[0],
+                'categoria'   => $p[1],
+                'suministros' => $p[2],
+                'amenaza'     => $p[3],
+                'lat'         => $lat + $p[4],
+                'lng'         => $lng + $p[5]
+            ];
+        }
+    }
+
+    if ($pdo instanceof PDO && !empty($items)) {
+        $stmt = $pdo->prepare("INSERT INTO zombie_pois (lat, lng, nombre, categoria, suministros, nivel_amenaza) VALUES (?, ?, ?, ?, ?, ?)");
+        foreach ($items as $poi) {
+            $stmt->execute([
+                $poi['lat'],
+                $poi['lng'],
+                $poi['nombre'],
+                $poi['categoria'],
+                $poi['suministros'] ?? '',
+                $poi['amenaza'] ?? 'Medio'
+            ]);
+        }
+    }
+
+    echo json_encode(['status' => 'ok', 'data' => $items]);
+    exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion']) && $_POST['accion'] === 'avanzar_historia') {
+    if (ob_get_length()) { ob_clean(); }
+    header('Content-Type: application/json; charset=utf-8');
+
+    $eleccionUsuario = trim($_POST['decision'] ?? 'Evaluar la situación y asegurar el perímetro inmediato');
+    $estadoContexto  = $_POST['contexto'] ?? '{}';
+    $sessionId       = trim($_POST['session_id'] ?? session_id());
+    $latActual       = (float)($_POST['lat'] ?? 36.7213);
+    $lngActual       = (float)($_POST['lng'] ?? -4.4214);
+
+    try {
+        $stmtH = $pdo->prepare("INSERT INTO zombie_huellas (session_id, lat, lng, accion) VALUES (?, ?, ?, ?)");
+        $stmtH->execute([$sessionId, $latActual, $lngActual, $eleccionUsuario]);
+    } catch (PDOException $e) {}
+
+    $deltaCuadrante = 0.008;
+    $huellasVecinas = [];
+    try {
+        $stmtV = $pdo->prepare("SELECT accion, creado_en, 
+                ROUND(TIMESTAMPDIFF(MINUTE, creado_en, NOW()) / 60, 1) as horas_atras
+                FROM zombie_huellas 
+                WHERE session_id != ? 
+                  AND lat BETWEEN ? AND ? 
+                  AND lng BETWEEN ? AND ? 
+                  AND creado_en >= NOW() - INTERVAL 72 HOUR 
+                ORDER BY creado_en DESC LIMIT 4");
+        $stmtV->execute([
+            $sessionId,
+            $latActual - $deltaCuadrante, $latActual + $deltaCuadrante,
+            $lngActual - $deltaCuadrante, $lngActual + $deltaCuadrante
+        ]);
+        $huellasVecinas = $stmtV->fetchAll();
+    } catch (PDOException $e) {}
+
+    $promptNarrativo = "Eres el narrador de un libro interactivo de supervivencia zombie estilo Project Zomboid y The Road. "
+        . "El usuario realiza esta acción: '$eleccionUsuario'.\n"
+        . "Estado local del tablero y lugares cercanos detectados:\n$estadoContexto\n\n"
+        . "RASTROS Y HUELLAS DEJADAS POR OTROS SUPERVIVIENTES EN ESTE SECTOR:\n"
+        . json_encode($huellasVecinas, JSON_UNESCAPED_UNICODE) . "\n\n"
+        . "Instrucciones obligatorias:\n"
+        . "1. Escribe en segunda persona ('Observas...', 'Tus pasos te guían hacia...'). Prosa literaria tensa, directa y atmosférica (máximo 110 palabras).\n"
+        . "2. Cita obligatoriamente y por su nombre auténtico los establecimientos y recintos presentes en los datos del tablero. Si hay huellas de otros jugadores, menciónalas en diferido en esos lugares específicos.\n"
+        . "3. Ofrece exactamente 3 opciones tácticas para continuar.\n"
+        . "4. Devuelve únicamente este JSON sin formato markdown ni texto extra:\n"
+        . "{\n"
+        . "  \"narracion\": \"Texto literario...\",\n"
+        . "  \"opciones\": [\"Opción A\", \"Opción B\", \"Opción C\"],\n"
+        . "  \"mover_jugador\": {\"desplazar\": true|false, \"hacia_poi\": \"nombre del POI o null\", \"delta_lat\": float, \"delta_lng\": float},\n"
+        . "  \"reclutar_companero\": true|false,\n"
+        . "  \"evento_alerta\": \"Frase corta para la consola\"\n"
+        . "}";
+
+    $raw = consultarGemini($promptNarrativo, $GEMINI_API_KEY, true);
+    $narrativaData = json_decode($raw, true);
+
+    if (!$narrativaData || empty($narrativaData['narracion'])) {
+        $narrativaData = [
+            "narracion" => "Avanzas entre los escombros de la calzada. En el suelo distingues pisadas recientes y una verja entreabierta con signos de haber sido forzada hace escasas horas.",
+            "opciones" => [
+                "Examinar el interior del edificio abierto",
+                "Seguir el rastro de huellas en el asfalto",
+                "Ocultarte y vigilar los accesos"
+            ],
+            "mover_jugador" => ["desplazar" => false, "hacia_poi" => null, "delta_lat" => 0, "delta_lng" => 0],
+            "reclutar_companero" => false,
+            "evento_alerta" => "Vestigios de otros supervivientes identificados en el cuadrante."
+        ];
+    }
+
+    echo json_encode(['status' => 'ok', 'data' => $narrativaData]);
+    exit;
+}
+?>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZombIA - Los muertos no mueren.</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <style>
+        #bg-fixed-layer {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: -10;
+            background: linear-gradient(rgba(10, 15, 20, 0.40), rgba(5, 5, 8, 0.55)), url('https://thanosweb.eu/recursos/zombie.jpg') center center / cover no-repeat fixed;
+            pointer-events: none;
+        }
+        body {
+            font-family: 'Consolas', 'Courier New', monospace;
+            background: transparent;
+        }
+        #mapa { height: calc(100vh - 350px); min-height: 280px; border: 2px solid rgba(185, 28, 28, 0.8); }
+        .survivor-node { color: #10b981; filter: drop-shadow(0 0 6px #059669); transition: transform 9.8s linear; }
+        .zombie-node { color: #ef4444; filter: drop-shadow(0 0 7px #dc2626); transition: transform 9.8s linear; }
+        .companion-node { color: #38bdf8; filter: drop-shadow(0 0 7px #0284c7); transition: transform 9.8s linear; }
+        .radar-sweep {
+            position: absolute; inset: 0; pointer-events: none; z-index: 400;
+            background: radial-gradient(circle, rgba(16, 185, 129, 0.04) 0%, transparent 75%);
+        }
+        .leaflet-tile-pane {
+            filter: invert(100%) hue-rotate(180deg) brightness(85%) contrast(115%);
+        }
+        .prose-adventure {
+            font-family: 'Georgia', 'Cambria', serif;
+            letter-spacing: 0.015em;
+        }
+    </style>
+</head>
+<body class="text-stone-200 min-h-screen flex flex-col p-3 md:p-5 overflow-hidden select-none">
+
+    <!-- Capa de Fondo Fija -->
+    <div id="bg-fixed-layer"></div>
+
+    <!-- Audio MP3 en Bucle -->
+    <audio id="bg-audio" loop preload="auto">
+        <source src="https://thanosweb.eu/recursos/zombie.mp3" type="audio/mpeg">
+    </audio>
+
+    <!-- Pantalla de Carga sobre la imagen de fondo descubierta -->
+    <div id="loader-dialog" class="fixed inset-0 z-[9999] flex items-center justify-center transition-opacity duration-700 bg-transparent">
+        <div class="bg-black/60 border-2 border-red-900/80 rounded-xl p-6 shadow-2xl flex flex-col items-center justify-center max-w-sm w-full mx-4 text-center backdrop-blur-sm">
+            <img src="https://thanosweb.eu/recursos/loading.gif" alt="Cargando..." class="w-24 h-24 object-contain mb-4 filter drop-shadow(0 0 10px #7f1d1d)">
+            <h2 class="text-lg font-black tracking-widest text-red-500 uppercase font-mono mb-1">INICIANDO PROTOCOLO</h2>
+            <p id="loader-status" class="text-xs text-stone-200 font-mono tracking-wider mb-4 animate-pulse">Sincronizando satélites GPS y entorno...</p>
+            <button id="btn-force-start" class="px-5 py-2.5 bg-red-950/80 hover:bg-red-800 border-2 border-red-600 rounded text-red-100 text-xs font-black uppercase tracking-widest transition shadow-lg active:scale-95">
+                <i class="fa-solid fa-play mr-2"></i> Entrar al Refugio
+            </button>
+        </div>
+    </div>
+
+    <!-- Interfaz de Usuario: Inicialmente Oculta (hidden) para mostrar solo la imagen de fondo durante la carga -->
+    <div id="main-ui-container" class="hidden flex-1 flex flex-col transition-opacity duration-700 opacity-0">
+        <header class="bg-black/40 border-2 border-red-950/60 px-4 py-3 rounded-lg shadow-2xl mb-3 flex flex-wrap items-center justify-between gap-4 backdrop-blur-md">
+            <div class="flex items-center gap-3">
+                <i class="fa-solid fa-biohazard text-red-500 text-3xl animate-pulse"></i>
+                <div>
+                    <h1 class="text-2xl font-black tracking-widest text-red-500 uppercase">ZombIA</h1>
+                    <p class="text-xs text-stone-300 font-semibold tracking-wide">Los muertos no mueren.</p>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-4">
+                <div class="grid grid-cols-4 gap-2 md:gap-3 text-center font-mono">
+                    <div class="bg-black/40 px-3 py-1.5 rounded border border-stone-800/60 backdrop-blur-sm">
+                        <span class="text-[10px] text-stone-300 block uppercase font-bold">Supervivientes</span>
+                        <span id="stat-survivors" class="text-base md:text-lg font-black text-emerald-400">0</span>
+                    </div>
+                    <div class="bg-black/40 px-3 py-1.5 rounded border border-stone-800/60 backdrop-blur-sm">
+                        <span class="text-[10px] text-stone-300 block uppercase font-bold">Infectados</span>
+                        <span id="stat-zombies" class="text-base md:text-lg font-black text-red-500">0</span>
+                    </div>
+                    <div class="bg-black/40 px-3 py-1.5 rounded border border-stone-800/60 backdrop-blur-sm">
+                        <span class="text-[10px] text-stone-300 block uppercase font-bold">Zonas Clave</span>
+                        <span id="stat-pois" class="text-base md:text-lg font-black text-amber-400">0</span>
+                    </div>
+                    <div class="bg-black/40 px-3 py-1.5 rounded border border-stone-800/60 backdrop-blur-sm">
+                        <span class="text-[10px] text-stone-300 block uppercase font-bold">Bajas</span>
+                        <span id="stat-deaths" class="text-base md:text-lg font-black text-rose-600">0</span>
+                    </div>
+                </div>
+
+                <button id="btn-toggle-music" class="px-3 py-2 bg-black/40 hover:bg-stone-800/60 border border-stone-700/60 hover:border-red-600 rounded text-stone-300 hover:text-red-400 text-xs transition backdrop-blur-sm" title="Música ambiental">
+                    <i id="music-icon" class="fa-solid fa-music"></i>
+                </button>
+            </div>
+        </header>
+
+        <div class="flex-1 relative rounded-lg overflow-hidden shadow-2xl">
+            <div id="mapa"></div>
+            <div class="radar-sweep"></div>
+        </div>
+
+        <section id="panel-historia" class="mt-2 bg-black/40 border-2 border-amber-600/50 rounded-lg p-3 shadow-2xl backdrop-blur-md relative">
+            <div class="flex items-center justify-between border-b border-stone-800/60 pb-2 mb-2">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-book-skull text-amber-500 text-sm"></i>
+                    <span class="text-xs font-bold uppercase tracking-wider text-amber-400 font-mono">Cuaderno de Bitácora // Modo Aventura</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button id="btn-replay-narrativa" class="text-stone-300 hover:text-amber-400 text-xs px-2 py-0.5 rounded border border-stone-700/60 bg-black/40 transition" title="Repetir locución">
+                        <i class="fa-solid fa-volume-high"></i>
+                    </button>
+                    <span id="badge-companero" class="hidden text-[10px] font-mono bg-sky-950/60 text-sky-300 border border-sky-600/60 px-2 py-0.5 rounded">
+                        <i class="fa-solid fa-user-group mr-1"></i>Equipo Formado
+                    </span>
+                </div>
+            </div>
+
+            <div id="narrativa-texto" class="prose-adventure text-stone-200 text-xs md:text-sm leading-relaxed max-h-24 md:max-h-28 overflow-y-auto mb-3 italic pr-1">
+                Cargando crónica del sector...
+            </div>
+
+            <div id="narrativa-opciones" class="grid grid-cols-1 md:grid-cols-3 gap-2 font-mono"></div>
+        </section>
+
+        <footer class="mt-2 bg-black/40 border-2 border-stone-800/60 rounded-lg shadow-2xl overflow-hidden backdrop-blur-md">
+            <button id="btn-toggle-console" class="w-full px-4 py-2 flex items-center justify-between text-xs font-mono uppercase tracking-wider text-stone-400 hover:text-stone-200 hover:bg-stone-900/40 transition">
+                <span class="flex items-center gap-2">
+                    <i class="fa-solid fa-terminal text-amber-500"></i> Consola Operativa
+                </span>
+                <i id="console-arrow" class="fa-solid fa-chevron-up text-stone-500 transition-transform"></i>
+            </button>
+            <div id="console-drawer" class="hidden border-t border-stone-800/60 px-4 py-2 bg-black/50 font-mono text-[11px] max-h-28 overflow-y-auto space-y-1">
+                <div class="text-emerald-400">> Protocolo activo. Inicializando mapa abierto...</div>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+    $(document).ready(function() {
+        const bgAudio = document.getElementById('bg-audio');
+        bgAudio.volume = 0.12; // Nivel de fondo suave y no invasivo
+
+        function activarAudioFondo() {
+            if (bgAudio.paused) {
+                bgAudio.play().catch(function() {});
+            }
+        }
+
+        $(document).one('click pointerdown keydown', function() {
+            activarAudioFondo();
+        });
+
+        function revelarInterfaz() {
+            activarAudioFondo();
+            if ($('#loader-dialog').length) {
+                $('#loader-dialog').addClass('opacity-0');
+                setTimeout(function() {
+                    $('#loader-dialog').remove();
+                    $('#main-ui-container').removeClass('hidden');
+                    setTimeout(() => {
+                        $('#main-ui-container').removeClass('opacity-0');
+                        map.invalidateSize();
+                    }, 50);
+                }, 700);
+            }
+        }
+
+        $('#btn-force-start').on('click', function(e) {
+            e.stopPropagation();
+            revelarInterfaz();
+        });
+
+        let tiempoMaximoSeguridad = setTimeout(function() {
+            revelarInterfaz();
+        }, 7000);
+
+        let tiempoMinimoCumplido = false;
+        setTimeout(function() {
+            tiempoMinimoCumplido = true;
+            if (primerCapituloListo) {
+                clearTimeout(tiempoMaximoSeguridad);
+                revelarInterfaz();
+            }
+        }, 2200);
+
+        $('#btn-toggle-music').on('click', function() {
+            if (bgAudio.paused) {
+                bgAudio.play();
+                $('#music-icon').removeClass('fa-volume-xmark text-red-500').addClass('fa-music');
+            } else {
+                bgAudio.pause();
+                $('#music-icon').removeClass('fa-music').addClass('fa-volume-xmark text-red-500');
+            }
+        });
+
+        let playerSessionId = localStorage.getItem('zombia_session_id');
+        if (!playerSessionId) {
+            playerSessionId = 'survivor_' + Math.random().toString(36).substring(2, 12);
+            localStorage.setItem('zombia_session_id', playerSessionId);
+        }
+
+        let coordsUsuario = [36.7213, -4.4214];
+        let map = L.map('mapa', { zoomControl: false }).setView(coordsUsuario, 16);
+        let supervivientes = [];
+        let zombies = [];
+        let pois = [];
+        let companeros = [];
+        let estelasJugador = [];
+        let contadorBajas = 0;
+        let simIniciada = false;
+        let primerCapituloListo = false;
+
+        let redVial = {};
+        let listaNodosIds = [];
+
+        let currentUtterance = null;
+
+        function detenerAudio() {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+            }
+        }
+
+        function leerTexto(texto) {
+            if ('speechSynthesis' in window) {
+                detenerAudio();
+                currentUtterance = new SpeechSynthesisUtterance(texto);
+                currentUtterance.lang = 'es-ES';
+                currentUtterance.rate = 0.95;
+                currentUtterance.pitch = 0.95;
+
+                let voices = window.speechSynthesis.getVoices();
+                let spanishVoice = voices.find(v => v.lang === 'es-ES') || voices.find(v => v.lang.startsWith('es'));
+                if (spanishVoice) {
+                    currentUtterance.voice = spanishVoice;
+                }
+
+                window.speechSynthesis.speak(currentUtterance);
+            }
+        }
+
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.onvoiceschanged = function() {
+                window.speechSynthesis.getVoices();
+            };
+        }
+
+        $('#btn-replay-narrativa').on('click', function() {
+            let cronica = $('#narrativa-texto').text().replace(/["”]/g, '').trim();
+            if (cronica) {
+                let textoCompleto = cronica + ". ¿Qué decides hacer a continuación? ";
+                $('#narrativa-opciones button').each(function(idx) {
+                    textoCompleto += `Opción ${idx + 1}: ${$(this).text().trim()}. `;
+                });
+                leerTexto(textoCompleto);
+            }
+        });
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+        let marcadorJugador = L.circleMarker(coordsUsuario, {
+            radius: 9,
+            color: '#1d4ed8',
+            fillColor: '#38bdf8',
+            fillOpacity: 1,
+            weight: 3,
+            pane: 'tooltipPane'
+        }).addTo(map).bindPopup("<b>Tú (Líder del Grupo)</b><br>Posición actual sobre el terreno.");
+
+        function registrarEvento(msg, claseColor = "text-stone-400") {
+            const hora = new Date().toLocaleTimeString();
+            $('#console-drawer').prepend(`<div class="${claseColor}">[${hora}] ${msg}</div>`);
+        }
+
+        $('#btn-toggle-console').on('click', function() {
+            const $drawer = $('#console-drawer');
+            const $arrow = $('#console-arrow');
+            $drawer.toggleClass('hidden');
+            $arrow.toggleClass('fa-chevron-up fa-chevron-down');
+        });
+
+        function descargarRedCalles(lat, lng) {
+            $('#loader-status').text("Trazando viales locales de la zona...");
+            registrarEvento("Trazando viales locales con OpenStreetMap...", "text-yellow-400");
+            const radio = 0.005;
+            const bbox = `${lat - radio},${lng - radio},${lat + radio},${lng + radio}`;
+            
+            const queryOverpass = `[out:json][timeout:15];way["highway"~"primary|secondary|tertiary|residential|pedestrian"](${bbox});out body;>;out skel qt;`;
+
+            $.ajax({
+                url: 'https://overpass-api.de/api/interpreter',
+                type: 'POST',
+                data: { data: queryOverpass },
+                dataType: 'json',
+                success: function(osm) {
+                    redVial = {};
+                    let nodosTemporales = {};
+                    let nombresCalles = new Set();
+
+                    osm.elements.forEach(el => {
+                        if (el.type === 'node') {
+                            nodosTemporales[el.id] = { lat: el.lat, lng: el.lon, vecinos: [] };
+                        }
+                        if (el.type === 'way' && el.tags && el.tags.name) {
+                            nombresCalles.add(el.tags.name);
+                        }
+                    });
+
+                    osm.elements.forEach(el => {
+                        if (el.type === 'way' && el.nodes && el.nodes.length > 1) {
+                            for (let i = 0; i < el.nodes.length - 1; i++) {
+                                let n1 = el.nodes[i];
+                                let n2 = el.nodes[i + 1];
+                                if (nodosTemporales[n1] && nodosTemporales[n2]) {
+                                    if (!redVial[n1]) redVial[n1] = nodosTemporales[n1];
+                                    if (!redVial[n2]) redVial[n2] = nodosTemporales[n2];
+                                    if (!redVial[n1].vecinos.includes(n2)) redVial[n1].vecinos.push(n2);
+                                    if (!redVial[n2].vecinos.includes(n1)) redVial[n2].vecinos.push(n1);
+                                }
+                            }
+                        }
+                    });
+
+                    listaNodosIds = Object.keys(redVial);
+                    if (listaNodosIds.length > 0) {
+                        registrarEvento(`Red vial activa: ${listaNodosIds.length} intersecciones conectadas.`, "text-emerald-400");
+                        generarSupervivientes(5);
+                        generarZombies(10);
+                        iniciarSimulacionAutomatica();
+                        ejecutarEscaneo(Array.from(nombresCalles).slice(0, 6).join(', '));
+                    } else {
+                        crearMallaVialEmergencia(lat, lng);
+                        ejecutarEscaneo("");
+                    }
+                },
+                error: function() {
+                    registrarEvento("Red Overpass lenta. Activando soporte de viales directos.", "text-amber-400");
+                    crearMallaVialEmergencia(lat, lng);
+                    ejecutarEscaneo("");
+                }
+            });
+        }
+
+        function crearMallaVialEmergencia(lat, lng) {
+            redVial = {};
+            let idx = 0;
+            const pasos = 5;
+            const delta = 0.0012;
+            for (let i = -pasos; i <= pasos; i++) {
+                for (let j = -pasos; j <= pasos; j++) {
+                    let id = "grid_" + idx++;
+                    redVial[id] = { lat: lat + i * delta, lng: lng + j * delta, vecinos: [] };
+                }
+            }
+            listaNodosIds = Object.keys(redVial);
+            listaNodosIds.forEach(id => {
+                let n = redVial[id];
+                listaNodosIds.forEach(otroId => {
+                    if (id !== otroId) {
+                        let d = Math.hypot(n.lat - redVial[otroId].lat, n.lng - redVial[otroId].lng);
+                        if (d < delta * 1.25) n.vecinos.push(otroId);
+                    }
+                });
+            });
+            generarSupervivientes(5);
+            generarZombies(10);
+            iniciarSimulacionAutomatica();
+        }
+
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(function(pos) {
+                coordsUsuario = [pos.coords.latitude, pos.coords.longitude];
+                map.setView(coordsUsuario, 16);
+                marcadorJugador.setLatLng(coordsUsuario);
+                map.invalidateSize();
+                registrarEvento("GPS fijado: " + coordsUsuario[0].toFixed(4) + ", " + coordsUsuario[1].toFixed(4), "text-emerald-400");
+                descargarRedCalles(coordsUsuario[0], coordsUsuario[1]);
+            }, function() {
+                registrarEvento("Sin permiso de GPS. Asignando posición base.", "text-amber-400");
+                map.invalidateSize();
+                descargarRedCalles(coordsUsuario[0], coordsUsuario[1]);
+            }, { timeout: 3500 });
+        } else {
+            descargarRedCalles(coordsUsuario[0], coordsUsuario[1]);
+        }
+
+        function iconoCategoria(cat) {
+            let ico = 'fa-campground';
+            let color = '#f59e0b';
+            if (cat.indexOf('Farmacia') !== -1) { ico = 'fa-notes-medical'; color = '#10b981'; }
+            else if (cat.indexOf('Hospital') !== -1) { ico = 'fa-square-h'; color = '#06b6d4'; }
+            else if (cat.indexOf('Supermercado') !== -1) { ico = 'fa-basket-shopping'; color = '#84cc16'; }
+            else if (cat.indexOf('Armería') !== -1) { ico = 'fa-gun'; color = '#ef4444'; }
+            else if (cat.indexOf('Refugio') !== -1) { ico = 'fa-shield-halved'; color = '#8b5cf6'; }
+            else if (cat.indexOf('Combustible') !== -1) { ico = 'fa-gas-pump'; color = '#f97316'; }
+
+            return L.divIcon({
+                className: 'marker-poi',
+                html: `<div style="background:#0c0a09; border:2px solid ${color}; color:${color}; width:32px; height:32px; border-radius:6px; display:flex; align-items:center; justify-content:center; box-shadow:0 0 10px ${color}88;">
+                        <i class="fa-solid ${ico}"></i>
+                       </div>`,
+                iconSize: [32, 32],
+                iconAnchor: [16, 16]
+            });
+        }
+
+        function ejecutarEscaneo(callesTexto = '') {
+            $('#loader-status').text("Localizando supervivientes e instalaciones clave...");
+            registrarEvento("Sondeando comercios e instalaciones reales con Gemini...", "text-yellow-400");
+            $.ajax({
+                url: window.location.pathname,
+                type: 'POST',
+                data: {
+                    accion: 'escanear_radar',
+                    lat: coordsUsuario[0],
+                    lng: coordsUsuario[1],
+                    calles_entorno: callesTexto
+                },
+                dataType: 'json',
+                success: function(res) {
+                    if (res.status === 'ok') {
+                        pois = res.data;
+                        $('#stat-pois').text(pois.length);
+                        pois.forEach(p => {
+                            let m = L.marker([p.lat, p.lng], { icon: iconoCategoria(p.categoria) }).addTo(map);
+                            m.bindPopup(`
+                                <div class="text-xs font-mono">
+                                    <b class="text-red-500 uppercase">${p.nombre}</b><br>
+                                    <span class="text-stone-400">Tipo:</span> ${p.categoria}<br>
+                                    <span class="text-stone-400">Peligro:</span> <b class="text-amber-400">${p.amenaza}</b><br>
+                                    <span class="text-stone-400">Botín:</span> ${p.suministros}
+                                </div>
+                            `);
+                        });
+                        registrarEvento(`Radar completado: ${pois.length} zonas de interés tácticas localizadas.`, "text-emerald-400");
+                        avanzarCapituloHistoria("Iniciar reconocimiento del sector");
+                    }
+                }
+            });
+        }
+
+        function generarSupervivientes(cant) {
+            if (listaNodosIds.length === 0) return;
+            for (let i = 0; i < cant; i++) {
+                let nodoId = listaNodosIds[Math.floor(Math.random() * listaNodosIds.length)];
+                let nodo = redVial[nodoId];
+                let m = L.marker([nodo.lat, nodo.lng], {
+                    icon: L.divIcon({
+                        className: 'survivor-node',
+                        html: '<i class="fa-solid fa-person-running fa-lg"></i>',
+                        iconSize: [22, 22]
+                    })
+                }).addTo(map);
+
+                supervivientes.push({ marker: m, nodoActual: nodoId, reclutado: false });
+            }
+            $('#stat-survivors').text(supervivientes.length);
+        }
+
+        function generarZombies(cant) {
+            if (listaNodosIds.length === 0) return;
+            for (let i = 0; i < cant; i++) {
+                let nodoId = listaNodosIds[Math.floor(Math.random() * listaNodosIds.length)];
+                let nodo = redVial[nodoId];
+                let m = L.marker([nodo.lat, nodo.lng], {
+                    icon: L.divIcon({
+                        className: 'zombie-node',
+                        html: '<i class="fa-solid fa-biohazard fa-lg"></i>',
+                        iconSize: [22, 22]
+                    })
+                }).addTo(map);
+
+                zombies.push({ marker: m, nodoActual: nodoId });
+            }
+            $('#stat-zombies').text(zombies.length);
+        }
+
+        function cicloDiezSegundos() {
+            const RANGO_DETECCION = 0.0035;
+            const RADIO_MAX_OPERATIVO = 0.0045;
+
+            function filtrarVecinosEnRadio(nodo, latCentro, lngCentro) {
+                let permitidos = nodo.vecinos.filter(vId => {
+                    let v = redVial[vId];
+                    return v && Math.hypot(v.lat - latCentro, v.lng - lngCentro) <= RADIO_MAX_OPERATIVO;
+                });
+                return permitidos.length > 0 ? permitidos : nodo.vecinos;
+            }
+
+            supervivientes.forEach(s => {
+                let nodoActual = redVial[s.nodoActual];
+                if (!nodoActual || !nodoActual.vecinos || nodoActual.vecinos.length === 0) return;
+
+                let distCentro = Math.hypot(nodoActual.lat - coordsUsuario[0], nodoActual.lng - coordsUsuario[1]);
+                if (distCentro > RADIO_MAX_OPERATIVO) {
+                    let nodoRetorno = listaNodosIds.find(id => {
+                        let n = redVial[id];
+                        return Math.hypot(n.lat - coordsUsuario[0], n.lng - coordsUsuario[1]) < RADIO_MAX_OPERATIVO * 0.5;
+                    });
+                    if (nodoRetorno) {
+                        s.nodoActual = nodoRetorno;
+                        s.marker.setLatLng([redVial[nodoRetorno].lat, redVial[nodoRetorno].lng]);
+                        return;
+                    }
+                }
+
+                let vecinosValidos = filtrarVecinosEnRadio(nodoActual, coordsUsuario[0], coordsUsuario[1]);
+                let amenazaDetectada = false;
+
+                zombies.forEach(z => {
+                    let zNodo = redVial[z.nodoActual];
+                    if (zNodo && Math.hypot(nodoActual.lat - zNodo.lat, nodoActual.lng - zNodo.lng) < RANGO_DETECCION) {
+                        amenazaDetectada = true;
+                    }
+                });
+
+                let siguiente = null;
+                if (s.reclutado) {
+                    let minDistJugador = Infinity;
+                    vecinosValidos.forEach(vId => {
+                        let vNodo = redVial[vId];
+                        let d = Math.hypot(vNodo.lat - coordsUsuario[0], vNodo.lng - coordsUsuario[1]);
+                        if (d < minDistJugador) {
+                            minDistJugador = d;
+                            siguiente = vId;
+                        }
+                    });
+                } else if (amenazaDetectada) {
+                    let maxDistAmenaza = -Infinity;
+                    vecinosValidos.forEach(vId => {
+                        let vNodo = redVial[vId];
+                        let minDistZombie = Infinity;
+                        zombies.forEach(z => {
+                            let zNodo = redVial[z.nodoActual];
+                            if (zNodo) {
+                                let d = Math.hypot(vNodo.lat - zNodo.lat, vNodo.lng - zNodo.lng);
+                                if (d < minDistZombie) minDistZombie = d;
+                            }
+                        });
+                        if (minDistZombie > maxDistAmenaza) {
+                            maxDistAmenaza = minDistZombie;
+                            siguiente = vId;
+                        }
+                    });
+                } else {
+                    siguiente = vecinosValidos[Math.floor(Math.random() * vecinosValidos.length)];
+                }
+
+                if (siguiente && redVial[siguiente]) {
+                    s.nodoActual = siguiente;
+                    s.marker.setLatLng([redVial[siguiente].lat, redVial[siguiente].lng]);
+                }
+            });
+
+            for (let i = zombies.length - 1; i >= 0; i--) {
+                let z = zombies[i];
+                let nodoActual = redVial[z.nodoActual];
+                if (!nodoActual || !nodoActual.vecinos || nodoActual.vecinos.length === 0) continue;
+
+                let distCentro = Math.hypot(nodoActual.lat - coordsUsuario[0], nodoActual.lng - coordsUsuario[1]);
+                if (distCentro > RADIO_MAX_OPERATIVO) {
+                    let nodoRetorno = listaNodosIds.find(id => {
+                        let n = redVial[id];
+                        return Math.hypot(n.lat - coordsUsuario[0], n.lng - coordsUsuario[1]) < RADIO_MAX_OPERATIVO * 0.6;
+                    });
+                    if (nodoRetorno) {
+                        z.nodoActual = nodoRetorno;
+                        z.marker.setLatLng([redVial[nodoRetorno].lat, redVial[nodoRetorno].lng]);
+                        continue;
+                    }
+                }
+
+                let vecinosValidos = filtrarVecinosEnRadio(nodoActual, coordsUsuario[0], coordsUsuario[1]);
+                let presas = [...supervivientes.map(s => ({ lat: redVial[s.nodoActual].lat, lng: redVial[s.nodoActual].lng, ref: s }))];
+                presas.push({ lat: coordsUsuario[0], lng: coordsUsuario[1], ref: 'jugador' });
+
+                let presaDetectada = null;
+                let minDistPresa = Infinity;
+
+                presas.forEach(p => {
+                    let d = Math.hypot(nodoActual.lat - p.lat, nodoActual.lng - p.lng);
+                    if (d < RANGO_DETECCION && d < minDistPresa) {
+                        minDistPresa = d;
+                        presaDetectada = p;
+                    }
+                });
+
+                let siguiente = null;
+                if (presaDetectada) {
+                    let menorDistRuta = Infinity;
+                    vecinosValidos.forEach(vId => {
+                        let vNodo = redVial[vId];
+                        let d = Math.hypot(vNodo.lat - presaDetectada.lat, vNodo.lng - presaDetectada.lng);
+                        if (d < menorDistRuta) {
+                            menorDistRuta = d;
+                            siguiente = vId;
+                        }
+                    });
+                } else {
+                    siguiente = vecinosValidos[Math.floor(Math.random() * vecinosValidos.length)];
+                }
+
+                if (siguiente && redVial[siguiente]) {
+                    z.nodoActual = siguiente;
+                    z.marker.setLatLng([redVial[siguiente].lat, redVial[siguiente].lng]);
+                }
+
+                for (let j = supervivientes.length - 1; j >= 0; j--) {
+                    if (supervivientes[j].nodoActual === z.nodoActual) {
+                        let victima = supervivientes[j];
+                        map.removeLayer(victima.marker);
+                        supervivientes.splice(j, 1);
+                        contadorBajas++;
+
+                        let nuevoZombie = L.marker([redVial[z.nodoActual].lat, redVial[z.nodoActual].lng], {
+                            icon: L.divIcon({
+                                className: 'zombie-node',
+                                html: '<i class="fa-solid fa-biohazard fa-lg"></i>',
+                                iconSize: [22, 22]
+                            })
+                        }).addTo(map);
+
+                        zombies.push({ marker: nuevoZombie, nodoActual: z.nodoActual });
+
+                        $('#stat-survivors').text(supervivientes.length);
+                        $('#stat-zombies').text(zombies.length);
+                        $('#stat-deaths').text(contadorBajas);
+                        registrarEvento("¡Ataque en cruce de calles! Superviviente asimilado por la horda.", "text-rose-500 font-bold");
+                        break;
+                    }
+                }
+            }
+        }
+
+        function iniciarSimulacionAutomatica() {
+            if (simIniciada) return;
+            simIniciada = true;
+            cicloDiezSegundos();
+            setInterval(cicloDiezSegundos, 10000);
+            registrarEvento("Simulación iniciada: patrulla táctica de calles cada 10 segundos.", "text-emerald-400");
+        }
+
+        function avanzarCapituloHistoria(decisionTomada) {
+            detenerAudio();
+            $('#narrativa-opciones').html('<div class="col-span-3 text-center py-2 text-amber-500"><i class="fa-solid fa-compass fa-spin mr-2"></i>La pluma escribe tu destino...</div>');
+
+            let contextoTablero = {
+                jugador: { lat: coordsUsuario[0], lng: coordsUsuario[1] },
+                aliados: companeros.length,
+                total_supervivientes: supervivientes.length,
+                total_zombies: zombies.length,
+                pois_cercanos: pois.slice(0, 6).map(p => ({ nombre: p.nombre, categoria: p.categoria, amenaza: p.amenaza }))
+            };
+
+            $.ajax({
+                url: window.location.pathname,
+                type: 'POST',
+                data: {
+                    accion: 'avanzar_historia',
+                    decision: decisionTomada,
+                    contexto: JSON.stringify(contextoTablero),
+                    session_id: playerSessionId,
+                    lat: coordsUsuario[0],
+                    lng: coordsUsuario[1]
+                },
+                dataType: 'json',
+                success: function(res) {
+                    if (res.status === 'ok') {
+                        let data = res.data;
+                        $('#narrativa-texto').html(`"${data.narracion}"`);
+
+                        let locucionCompleta = data.narracion + ". ";
+                        if (data.opciones && data.opciones.length > 0) {
+                            locucionCompleta += "¿Qué decides hacer a continuación? ";
+                            data.opciones.forEach((opc, idx) => {
+                                locucionCompleta += `Opción ${idx + 1}: ${opc}. `;
+                            });
+                        }
+                        leerTexto(locucionCompleta);
+
+                        if (data.evento_alerta) {
+                            registrarEvento(data.evento_alerta, "text-amber-400 font-semibold");
+                        }
+
+                        if (data.reclutar_companero && supervivientes.length > 0) {
+                            let candidato = supervivientes.find(s => !s.reclutado);
+                            if (candidato) {
+                                candidato.reclutado = true;
+                                companeros.push(candidato);
+                                candidato.marker.setIcon(L.divIcon({
+                                    className: 'companion-node',
+                                    html: '<i class="fa-solid fa-person-circle-check fa-lg"></i>',
+                                    iconSize: [22, 22]
+                                }));
+                                $('#badge-companero').removeClass('hidden').html(`<i class="fa-solid fa-user-group mr-1"></i>Aliados: ${companeros.length}`);
+                                registrarEvento("¡Nuevo aliado! Un civil se une a tu grupo táctico.", "text-sky-400 font-bold");
+                            }
+                        }
+
+                        if (data.mover_jugador && data.mover_jugador.desplazar) {
+                            let latAnterior = Number(coordsUsuario[0]);
+                            let lngAnterior = Number(coordsUsuario[1]);
+                            let nuevaLat = latAnterior;
+                            let nuevaLng = lngAnterior;
+
+                            if (data.mover_jugador.hacia_poi && pois.length > 0) {
+                                let busqueda = data.mover_jugador.hacia_poi.toLowerCase();
+                                let destinoPoi = pois.find(p => p.nombre.toLowerCase().includes(busqueda) || busqueda.includes(p.nombre.toLowerCase()));
+                                if (destinoPoi) {
+                                    nuevaLat = Number(destinoPoi.lat);
+                                    nuevaLng = Number(destinoPoi.lng);
+                                }
+                            } else if (data.mover_jugador.delta_lat || data.mover_jugador.delta_lng) {
+                                nuevaLat += Number(data.mover_jugador.delta_lat || 0);
+                                nuevaLng += Number(data.mover_jugador.delta_lng || 0);
+                            }
+
+                            if (!isNaN(nuevaLat) && !isNaN(nuevaLng) && (nuevaLat !== latAnterior || nuevaLng !== lngAnterior)) {
+                                let tramoRuta = L.polyline([[latAnterior, lngAnterior], [nuevaLat, nuevaLng]], {
+                                    color: '#38bdf8',
+                                    weight: 3,
+                                    opacity: 0.85,
+                                    dashArray: '4, 6',
+                                    lineCap: 'round'
+                                }).addTo(map);
+
+                                estelasJugador.push(tramoRuta);
+
+                                setTimeout(() => {
+                                    map.removeLayer(tramoRuta);
+                                    let idx = estelasJugador.indexOf(tramoRuta);
+                                    if (idx > -1) estelasJugador.splice(idx, 1);
+                                }, 30000);
+
+                                coordsUsuario = [nuevaLat, nuevaLng];
+                                marcadorJugador.setLatLng(coordsUsuario);
+                                if (marcadorJugador.bringToFront) {
+                                    marcadorJugador.bringToFront();
+                                }
+                                map.panTo(coordsUsuario, { animate: true, duration: 1.2 });
+                            }
+                        }
+
+                        let $opcionesCont =$('#narrativa-opciones').empty();
+                        data.opciones.forEach((opc) => {
+                            let $btn =$(`<button class="bg-black/40 hover:bg-stone-800/60 border border-stone-700/60 hover:border-amber-500 text-stone-200 hover:text-amber-300 py-2 px-3 rounded text-[11px] text-left transition leading-snug shadow backdrop-blur-sm">
+                                <i class="fa-solid fa-angle-right text-amber-500 mr-1.5"></i>${opc}
+                            </button>`);
+                            $btn.on('click', function() {
+                                avanzarCapituloHistoria(opc);
+                            });
+                            $opcionesCont.append($btn);
+                        });
+
+                        primerCapituloListo = true;
+                        if (tiempoMinimoCumplido) {
+                            clearTimeout(tiempoMaximoSeguridad);
+                            revelarInterfaz();
+                        }
+                    }
+                },
+                error: function() {
+                    $('#narrativa-opciones').html('<div class="col-span-3 text-rose-500 text-xs text-center">Fallo de comunicación con la bitácora.</div>');
+                    revelarInterfaz();
+                }
+            });
+        }
+    });
+    </script>
+</body>
+</html>

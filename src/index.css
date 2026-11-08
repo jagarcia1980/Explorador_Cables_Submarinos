@@ -1,0 +1,117 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+}
+
+/* Custom scrollbar for deep ocean feel */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #020617;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+/* Custom Leaflet Map styling for deep ocean theme */
+.leaflet-container {
+  background-color: #020617 !important;
+  font-family: inherit !important;
+}
+
+/* OpenStreetMap Tactical Ocean Filters (No API Key Required) */
+.theme-osm-dark .leaflet-tile-pane {
+  filter: invert(100%) hue-rotate(180deg) brightness(85%) contrast(115%);
+}
+
+.theme-osm-contrast .leaflet-tile-pane {
+  filter: invert(95%) hue-rotate(190deg) contrast(130%) brightness(75%);
+}
+
+.theme-osm-standard .leaflet-tile-pane {
+  filter: none;
+}
+
+.leaflet-popup-content-wrapper {
+  background-color: #0f172a !important;
+  color: #f1f5f9 !important;
+  border: 1px solid #334155 !important;
+  border-radius: 0.75rem !important;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5) !important;
+  padding: 0 !important;
+}
+
+.leaflet-popup-content {
+  margin: 0.85rem !important;
+  line-height: 1.4 !important;
+}
+
+.leaflet-popup-tip {
+  background-color: #0f172a !important;
+  border: 1px solid #334155 !important;
+}
+
+.leaflet-popup-close-button {
+  color: #94a3b8 !important;
+  padding: 6px !important;
+}
+
+.leaflet-popup-close-button:hover {
+  color: #f8fafc !important;
+}
+
+.leaflet-bar {
+  border: 1px solid #334155 !important;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.4) !important;
+  border-radius: 0.5rem !important;
+  overflow: hidden;
+}
+
+.leaflet-bar a {
+  background-color: #0f172a !important;
+  color: #cbd5e1 !important;
+  border-bottom: 1px solid #1e293b !important;
+}
+
+.leaflet-bar a:hover {
+  background-color: #1e293b !important;
+  color: #38bdf8 !important;
+}
+
+/* Station marker pulse animation */
+@keyframes beaconPulse {
+  0% {
+    transform: scale(0.8);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+.station-pulse-ring {
+  animation: beaconPulse 2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+}
+
+/* Pulsing cable line animation */
+@keyframes flowDash {
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+.animated-cable-flow {
+  animation: flowDash 3s linear infinite;
+}
+

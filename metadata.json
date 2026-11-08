@@ -1,0 +1,6 @@
+{
+  "name": "Descubre los Cables Submarinos Transoceánicos",
+  "description": "Explorador interactivo de los cables de comunicaciones submarinos transoceánicos, con mapas de rutas, capacidad, propiedad, modo historia y simulador óptico.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
